@@ -12,15 +12,48 @@ class NMPC:
         N_horizon == control horizon
         '''
         self.ocp   = AcadosOcp()
-        self.model = model
-        self.ocp.model = self.model
+        self.ocp.model = model
         self.Ts    = Ts
         self.Tf    = Ts*N_horizon
         self.N_horizon = N_horizon
+
+    def x_error(self, x, ref):
+        """
+        Calculates the state deviation.
+        
+        :param x: State vector
+        :param ref: Reference vector
+        :return: error vector
+        """
+        q1 = ref[3:7]
+        print(x.size())
+        q2 = x[3:7]
+        print(x.size())
+
+        # Sice unit quaternion, quaternion inverse is equal to its conjugate
+        q_conj = ca.vertcat(q2[0], -q2[1], -q2[2], -q2[3])
+        q2 = q_conj/ca.norm_2(q2)
+        
+        q_w = q1[0] * q2[0] - q1[1] * q2[1] - q1[2] * q2[2] - q1[3] * q2[3]
+        q_x = q1[0] * q2[1] + q1[1] * q2[0] + q1[2] * q2[3] - q1[3] * q2[2]
+        q_y = q1[0] * q2[2] - q1[1] * q2[3] + q1[2] * q2[0] + q1[3] * q2[1]
+        q_z = q1[0] * q2[3] + q1[1] * q2[2] - q1[2] * q2[1] + q1[3] * q2[0]
+
+        q_error = ca.vertcat(q_w, q_x, q_y, q_z)
+        print(x.size())
+
+        pos_error = x[:3]
+        ss = ref[:3]
+        vel_error = x[7:13] - ref[7:13]
+        u_error   = x[13:] - ref[13:]
+
+        x_error = ca.vertcat(pos_error, q_error, vel_error, u_error)
+        return x_error
+
         
     def setup(self, x0):
-        nx = self.model.x.rows()
-        nu = self.model.u.rows()
+        nx = self.ocp.model.x.rows()
+        nu = self.ocp.model.u.rows()
 
         # --------------------------- Cost setup ---------------------------------
         # State weight matrix
@@ -43,18 +76,17 @@ class NMPC:
         R_diag[4: ] = 1e-5
         R = np.diag(R_diag)*10
 
+        Q_full = ca.diagcat(Q, R).full()
+
         # Stage costs
-        ref = np.zeros((nx + nu,))
-        self.ocp.cost.yref  = ref        # Init ref point. The true references are declared in the sim. for-loop
-        self.ocp.cost.cost_type = 'NONLINEAR_LS'
-        self.ocp.cost.W = ca.diagcat(Q, R).full()
-        self.ocp.model.cost_y_expr = ca.vertcat(self.model.x, self.model.u)
+        ref = np.zeros((nx))
+        self.ocp.cost.cost_type = 'EXTERNAL' 
+        self.ocp.model.cost_expr_ext_cost = self.x_error(self.ocp.model.x, ref).T @ Q @ self.x_error(self.ocp.model.x, ref)  +  self.ocp.model.u.T @ R @ self.ocp.model.u
         
         # Terminal cost
-        self.ocp.cost.cost_type_e = 'NONLINEAR_LS'
-        self.ocp.cost.W_e = Q#np.zeros(np.shape(Q))
-        self.ocp.model.cost_y_expr_e = self.model.x
-        self.ocp.cost.yref_e = ref[:nx]
+        self.ocp.cost.cost_type_e = 'EXTERNAL'
+        t = self.ocp.model.x[:3]
+        self.ocp.model.cost_expr_ext_cost = self.x_error(self.ocp.model.x, ref).T @ Q @ self.x_error(self.ocp.model.x, ref) 
 
         # --------------------- Constraint Setup --------------------------
         vbs_dot = 10    # Maximum rate of change for the VBS
@@ -107,7 +139,7 @@ class NMPC:
         self.ocp.solver_options.regularize_method = 'NO_REGULARIZE'
 
 
-        solver_json = 'acados_ocp_' + self.model.name + '.json'
+        solver_json = 'acados_ocp_' + self.ocp.model.name + '.json'
         acados_ocp_solver = AcadosOcpSolver(self.ocp, json_file = solver_json)
 
         # create an integrator with the same settings as used in the OCP solver.
